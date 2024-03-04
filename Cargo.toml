@@ -1,0 +1,13 @@
+[package]
+name = "bevy_xpbd_tutorial"
+version = "0.1.0"
+authors = ["Rodney Johnson <ask@rodneylab.com>"]
+edition = "2021"
+license = "BSD-3-Clause"
+repository = "https://github.com/rodneylab/bevy-xpbd-tutorial"
+description = "Video game phyics engine using Bevy by following Johan Helsing tutorial"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+bevy = "0.13"
