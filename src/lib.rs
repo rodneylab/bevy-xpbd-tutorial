@@ -129,7 +129,7 @@ fn update_vel(mut query: Query<(&mut Pos, &mut PrevPos, &mut Vel)>) {
 }
 
 fn solve_vel(
-    mut query: Query<(&mut Vel, &PreSolveVel, &Pos, &Mass, &Restitution)>,
+    query: Query<(&mut Vel, &PreSolveVel, &Pos, &Mass, &Restitution)>,
     contacts: Res<Contacts>,
 ) {
     for (entity_a, entity_b) in contacts.0.iter().cloned() {
