@@ -3,7 +3,7 @@ mod entity;
 
 use bevy::prelude::*;
 
-pub use components::{CircleCollider, Mass, Pos, PreSolveVel, PrevPos, Vel, Restitution};
+pub use components::{CircleCollider, Mass, Pos, PreSolveVel, PrevPos, Restitution, Vel};
 pub use entity::ParticleBundle;
 
 pub const DELTA_TIME: f32 = 1. / 60.; // 60 fps
@@ -128,11 +128,14 @@ fn update_vel(mut query: Query<(&mut Pos, &mut PrevPos, &mut Vel)>) {
     }
 }
 
-fn solve_vel(mut query: Query<(&mut Vel, &PreSolveVel, &Pos, &Mass, &Restitution)>, contacts: Res<Contacts>) {
+fn solve_vel(
+    mut query: Query<(&mut Vel, &PreSolveVel, &Pos, &Mass, &Restitution)>,
+    contacts: Res<Contacts>,
+) {
     for (entity_a, entity_b) in contacts.0.iter().cloned() {
         let (
             (mut vel_a, pre_solve_vel_a, pos_a, mass_a, restitution_a),
-            (mut vel_b, pre_solve_vel_b, pos_b, mass_b,restitution_b),
+            (mut vel_b, pre_solve_vel_b, pos_b, mass_b, restitution_b),
         ) = unsafe {
             // Ensure safety
             assert!(entity_a != entity_b);
@@ -147,7 +150,7 @@ fn solve_vel(mut query: Query<(&mut Vel, &PreSolveVel, &Pos, &Mass, &Restitution
 
         let relative_vel = vel_a.0 - vel_b.0;
         let normal_vel = Vec2::dot(relative_vel, normal);
-        let restitution = (restitution_a.0 + restitution_b.0)/2.;
+        let restitution = (restitution_a.0 + restitution_b.0) / 2.;
 
         let w_a = 1. / mass_a.0;
         let w_b = 1. / mass_b.0;
@@ -155,7 +158,6 @@ fn solve_vel(mut query: Query<(&mut Vel, &PreSolveVel, &Pos, &Mass, &Restitution
 
         vel_a.0 += normal * (-normal_vel - restitution * pre_solve_normal_vel) * w_a / w_sum;
         vel_b.0 -= normal * (-normal_vel - restitution * pre_solve_normal_vel) * w_b / w_sum;
-
     }
 }
 

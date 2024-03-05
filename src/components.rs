@@ -26,7 +26,7 @@ impl Default for Mass {
     }
 }
 
-#[derive(Component,Debug)]
+#[derive(Component, Debug)]
 pub struct Restitution(pub f32);
 
 impl Default for Restitution {

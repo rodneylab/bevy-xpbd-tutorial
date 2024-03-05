@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 
-use crate::{CircleCollider, Mass, Pos, PreSolveVel, PrevPos, Vel, DELTA_TIME, Restitution};
+use crate::{CircleCollider, Mass, Pos, PreSolveVel, PrevPos, Restitution, Vel, DELTA_TIME};
 
 #[derive(Bundle, Default)]
 pub struct ParticleBundle {
@@ -10,7 +10,7 @@ pub struct ParticleBundle {
     pub collider: CircleCollider,
     pub vel: Vel,
     pub presolve_vel: PreSolveVel,
-    restitution: Restitution
+    restitution: Restitution,
 }
 
 impl ParticleBundle {
