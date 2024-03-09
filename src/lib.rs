@@ -1,13 +1,15 @@
 mod components;
 mod entity;
+mod resources;
 
 use bevy::{
     app::{App, FixedUpdate, Plugin, Update},
     ecs::{
         entity::Entity,
         query::{With, Without},
-        schedule::{IntoSystemConfigs, SystemSet},
-        system::{Query, Res, ResMut, Resource},
+        schedule::{IntoSystemConfigs, Schedule, ScheduleLabel, SystemSet},
+        system::{Query, Res, ResMut},
+        world::World,
     },
     math::Vec2,
     time::{Fixed, Time},
@@ -17,29 +19,18 @@ pub use components::{
     BoxCollider, CircleCollider, Mass, Pos, PreSolveVel, PrevPos, Restitution, Vel,
 };
 pub use entity::{ParticleBundle, StaticBoxBundle, StaticCircleBundle};
+pub use resources::Gravity;
+use resources::{CollisionPairs, Contacts, StaticContacts};
 
-pub const DELTA_TIME: f32 = 1. / 60.; // 60 fps
+pub const DELTA_TIME: f32 = 1.0 / 60.0; // 60 fps
+pub const NUM_SUBSTEPS: u32 = 10;
+pub const SUB_DT: f32 = DELTA_TIME / NUM_SUBSTEPS as f32;
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, SystemSet)]
 struct FixedUpdateSet;
 
 #[derive(Debug, Default)]
 pub struct XPBDPlugin;
-
-#[derive(Default, Debug, Resource)]
-pub struct Contacts(pub Vec<(Entity, Entity, Vec2)>);
-
-#[derive(Default, Debug, Resource)]
-pub struct StaticContacts(pub Vec<(Entity, Entity, Vec2)>);
-
-#[derive(Debug, Resource)]
-pub struct Gravity(pub Vec2);
-
-impl Default for Gravity {
-    fn default() -> Self {
-        Self(Vec2::new(0., -9.81))
-    }
-}
 
 #[derive(SystemSet, Debug, Hash, PartialEq, Eq, Clone)]
 enum Step {
@@ -48,50 +39,97 @@ enum Step {
     SolvePositions,
     UpdateVelocities,
     SolveVelocities,
+    Substeps,
 }
 
+#[derive(ScheduleLabel, Debug, Hash, PartialEq, Eq, Clone)]
+struct SubstepSchedule;
+
+fn run_substep_schedule(world: &mut World) {
+    for _substep in 0..NUM_SUBSTEPS {
+        world.run_schedule(SubstepSchedule);
+    }
+}
 impl Plugin for XPBDPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<Gravity>()
-            .init_resource::<Contacts>()
-            .init_resource::<StaticContacts>();
-        app.insert_resource(Time::<Fixed>::from_seconds(DELTA_TIME.into()))
+        let mut substep_schedule = Schedule::new(SubstepSchedule);
+        substep_schedule
+            .add_systems(integrate.in_set(Step::Integrate))
             .add_systems(
-                FixedUpdate,
-                collect_collision_pairs
-                    .in_set(Step::CollectCollisionPairs)
-                    .before(Step::Integrate),
-            )
-            .add_systems(Update, integrate.in_set(Step::Integrate))
-            .add_systems(Update, clear_contacts.before(Step::SolvePositions))
-            .add_systems(
-                Update,
                 (solve_pos, solve_pos_statics, solve_pos_static_boxes)
                     .in_set(Step::SolvePositions)
                     .after(Step::Integrate),
             )
             .add_systems(
-                Update,
                 update_vel
                     .in_set(Step::UpdateVelocities)
                     .after(Step::SolvePositions),
             )
             .add_systems(
-                Update,
                 (solve_vel, solve_vel_statics)
                     .in_set(Step::SolveVelocities)
                     .after(Step::UpdateVelocities),
+            );
+        app.init_resource::<Gravity>()
+            .init_resource::<CollisionPairs>()
+            .init_resource::<Contacts>()
+            .init_resource::<StaticContacts>();
+        app.add_schedule(substep_schedule);
+        app.insert_resource(Time::<Fixed>::from_seconds(DELTA_TIME.into()))
+            .add_systems(
+                FixedUpdate,
+                collect_collision_pairs
+                    .in_set(Step::CollectCollisionPairs)
+                    .before(Step::Substeps),
             )
-            .add_systems(Update, sync_transforms.after(Step::SolveVelocities));
+            .add_systems(
+                Update,
+                run_substep_schedule
+                    .in_set(Step::Substeps)
+                    .before(Step::SolveVelocities),
+            )
+            .add_systems(Update, sync_transforms.after(Step::Substeps));
     }
 }
 
-fn collect_collision_pairs() {}
+fn collect_collision_pairs(
+    query: Query<(Entity, &Pos, &Vel, &CircleCollider)>,
+    mut collision_pairs: ResMut<CollisionPairs>,
+) {
+    collision_pairs.0.clear();
 
-fn clear_contacts(mut contacts: ResMut<Contacts>, mut static_contacts: ResMut<StaticContacts>) {
-    contacts.0.clear();
-    static_contacts.0.clear();
+    let k = 2.0; // safety margin multiplier, bigger than 1 to account for sudden accelerations
+    let safety_margin_factor = k * DELTA_TIME;
+    let safety_margin_factor_sqr = safety_margin_factor * safety_margin_factor;
+
+    unsafe {
+        for (entity_a, pos_a, vel_a, circle_a) in query.iter_unsafe() {
+            let vel_a_sqr = vel_a.0.length_squared();
+            for (entity_b, pos_b, vel_b, circle_b) in query.iter_unsafe() {
+                // Ensure safety
+                if entity_a <= entity_b {
+                    continue;
+                }
+
+                let ab = pos_b.0 - pos_a.0;
+                let vel_b_sqr = vel_b.0.length_squared();
+                let safety_margin_sqr = safety_margin_factor_sqr * (vel_a_sqr + vel_b_sqr);
+
+                let combined_radius = circle_a.radius + circle_b.radius + safety_margin_sqr.sqrt();
+
+                let ab_sqr_len = ab.length_squared();
+                if ab_sqr_len < combined_radius * combined_radius {
+                    collision_pairs.0.push((entity_a, entity_b));
+                }
+            }
+        }
+    }
 }
+
+//fn clear_contacts(mut contacts: ResMut<Contacts>, mut static_contacts: ResMut<StaticContacts>) {
+//    contacts.0.clear();
+//    static_contacts.0.clear();
+//}
 
 fn integrate(
     mut query: Query<(&mut Pos, &mut PrevPos, &mut Vel, &mut PreSolveVel, &Mass)>,
@@ -102,21 +140,24 @@ fn integrate(
 
         let gravitation_force = mass.0 * gravity.0;
         let external_forces = gravitation_force;
-        vel.0 += DELTA_TIME * external_forces / mass.0;
-        pos.0 += DELTA_TIME * vel.0;
+        vel.0 += SUB_DT * external_forces / mass.0;
+        pos.0 += SUB_DT * vel.0;
         pre_sol_velocity.0 = vel.0;
     }
 }
 
 fn solve_pos(
-    mut query: Query<(Entity, &mut Pos, &CircleCollider, &Mass)>,
-    mut contacts: ResMut<Contacts>,
+    query: Query<(&mut Pos, &CircleCollider, &Mass)>,
+    collision_pairs: Res<CollisionPairs>,
 ) {
-    let mut iter = query.iter_combinations_mut();
-    while let Some(
-        [(entity_a, mut pos_a, circle_a, mass_a), (entity_b, mut pos_b, circle_b, mass_b)],
-    ) = iter.fetch_next()
-    {
+    for (entity_a, entity_b) in collision_pairs.0.iter() {
+        let ((mut pos_a, circle_a, mass_a), (mut pos_b, circle_b, mass_b)) = unsafe {
+            assert!(entity_a != entity_b); // Ensure we do not violate memory constraints
+            (
+                query.get_unchecked(*entity_a).unwrap(),
+                query.get_unchecked(*entity_b).unwrap(),
+            )
+        };
         let ab = pos_b.0 - pos_a.0;
         let combined_radius = circle_a.radius + circle_b.radius;
         let ab_sqr_len = ab.length_squared();
@@ -131,8 +172,6 @@ fn solve_pos(
 
             pos_a.0 -= normal * penetration_depth * w_a / w_sum;
             pos_b.0 += normal * penetration_depth * w_b / w_sum;
-
-            contacts.0.push((entity_a, entity_b, normal));
         }
     }
 }
@@ -203,7 +242,7 @@ fn solve_pos_static_boxes(
 
 fn update_vel(mut query: Query<(&mut Pos, &mut PrevPos, &mut Vel)>) {
     for (pos, prev_pos, mut vel) in query.iter_mut() {
-        vel.0 = (pos.0 - prev_pos.0) / DELTA_TIME;
+        vel.0 = (pos.0 - prev_pos.0) / SUB_DT;
     }
 }
 
@@ -220,7 +259,6 @@ fn solve_vel(query: Query<(&mut Vel, &PreSolveVel, &Mass, &Restitution)>, contac
                 query.get_unchecked(entity_b).unwrap(),
             )
         };
-        //let normal = (pos_b.0 - pos_a.0).normalize();
         let pre_solve_relative_vel = pre_solve_vel_a.0 - pre_solve_vel_b.0;
         let pre_solve_normal_vel = Vec2::dot(pre_solve_relative_vel, normal);
 

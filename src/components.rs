@@ -51,3 +51,26 @@ pub struct PreSolveVel(pub(crate) Vec2);
 
 #[derive(Component, Debug, Default)]
 pub struct Vel(pub(crate) Vec2);
+
+#[cfg(test)]
+mod tests {
+    use super::CircleCollider;
+    use float_cmp::approx_eq;
+
+    #[test]
+    fn circle_collide_sets_expected_defaults() {
+        // arrange
+        // act
+        let collider = CircleCollider::default();
+        let result = collider.radius;
+
+        // assert
+        assert!(approx_eq!(
+            f32,
+            result,
+            0.5,
+            epsilon = f32::EPSILON,
+            ulps = 2
+        ));
+    }
+}
