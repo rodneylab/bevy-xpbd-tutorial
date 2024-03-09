@@ -88,7 +88,7 @@ jobs:
       - name: Run tests
         run: cargo test
       - name: Generate code coverage
-        run: grcov . -s . --binary-path ./target/debug/ -t lcov --branch --ignore-not-existing -o ./target/debug/coverage/
+        run: grcov . -s . --binary-path ./target/debug/ -t lcov --branch --ignore-not-existing -o ./target/debug/
       - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@54bcd8715eee62d40e33596ef5e8f0f48dbbccab # v4.1.0
         env:
