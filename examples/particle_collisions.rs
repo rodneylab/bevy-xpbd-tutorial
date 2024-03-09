@@ -1,6 +1,21 @@
 #![warn(clippy::all, clippy::pedantic)]
 
-use bevy::prelude::*;
+use bevy::{
+    app::{App, Startup, Update},
+    asset::Assets,
+    core_pipeline::core_3d::Camera3dBundle,
+    ecs::system::{Commands, ResMut},
+    math::{primitives::Sphere, Vec2, Vec3},
+    pbr::{PbrBundle, StandardMaterial},
+    render::{
+        camera::ClearColor,
+        color::Color,
+        mesh::{Mesh, Meshable},
+        view::Msaa,
+    },
+    transform::components::Transform,
+    DefaultPlugins,
+};
 use bevy_xpbd_tutorial::{Gravity, ParticleBundle, XPBDPlugin};
 
 fn startup(

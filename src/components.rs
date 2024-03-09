@@ -1,4 +1,15 @@
-use bevy::prelude::*;
+use bevy::{ecs::component::Component, math::Vec2};
+
+#[derive(Component, Debug)]
+pub struct BoxCollider {
+    pub size: Vec2,
+}
+
+impl Default for BoxCollider {
+    fn default() -> Self {
+        Self { size: Vec2::ONE }
+    }
+}
 
 #[derive(Component, Debug)]
 pub struct CircleCollider {
