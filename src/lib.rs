@@ -1,4 +1,5 @@
 mod components;
+mod contact;
 mod entity;
 mod resources;
 
@@ -11,20 +12,25 @@ use bevy::{
         system::{Query, Res, ResMut},
         world::World,
     },
+    log::debug,
     math::Vec2,
     time::{Fixed, Time},
 };
 
 pub use components::{
-    BoxCollider, CircleCollider, Mass, Pos, PreSolveVel, PrevPos, Restitution, Vel,
+    Aabb, BoxCollider, CircleCollider, Mass, Pos, PreSolveVel, PrevPos, Restitution, Vel,
 };
-pub use entity::{ParticleBundle, StaticBoxBundle, StaticCircleBundle};
+pub use contact::Contact;
+pub use entity::{DynamicBoxBundle, ParticleBundle, StaticBoxBundle, StaticCircleBundle};
 pub use resources::Gravity;
 use resources::{CollisionPairs, Contacts, StaticContacts};
 
 pub const DELTA_TIME: f32 = 1.0 / 60.0; // 60 fps
 pub const NUM_SUBSTEPS: u32 = 10;
 pub const SUB_DT: f32 = DELTA_TIME / NUM_SUBSTEPS as f32;
+
+/// Safety margin bigger then DELTA_TIME added to AABBs to account for sudden accelerations
+const COLLISION_PAIR_VEL_MARGIN_FACTOR: f32 = 2.0 * DELTA_TIME;
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, SystemSet)]
 struct FixedUpdateSet;
@@ -56,7 +62,13 @@ impl Plugin for XPBDPlugin {
         substep_schedule
             .add_systems(integrate.in_set(Step::Integrate))
             .add_systems(
-                (solve_pos, solve_pos_statics, solve_pos_static_boxes)
+                (
+                    solve_pos,
+                    solve_pos_box_box,
+                    solve_pos_statics,
+                    solve_pos_static_boxes,
+                    solve_pos_static_box_box,
+                )
                     .in_set(Step::SolvePositions)
                     .after(Step::Integrate),
             )
@@ -78,6 +90,10 @@ impl Plugin for XPBDPlugin {
         app.insert_resource(Time::<Fixed>::from_seconds(DELTA_TIME.into()))
             .add_systems(
                 FixedUpdate,
+                (update_aabb_box, update_aabb_circle).before(Step::CollectCollisionPairs),
+            )
+            .add_systems(
+                Update,
                 collect_collision_pairs
                     .in_set(Step::CollectCollisionPairs)
                     .before(Step::Substeps),
@@ -93,32 +109,19 @@ impl Plugin for XPBDPlugin {
 }
 
 fn collect_collision_pairs(
-    query: Query<(Entity, &Pos, &Vel, &CircleCollider)>,
+    query: Query<(Entity, &Aabb)>,
     mut collision_pairs: ResMut<CollisionPairs>,
 ) {
     collision_pairs.0.clear();
 
-    let k = 2.0; // safety margin multiplier, bigger than 1 to account for sudden accelerations
-    let safety_margin_factor = k * DELTA_TIME;
-    let safety_margin_factor_sqr = safety_margin_factor * safety_margin_factor;
-
     unsafe {
-        for (entity_a, pos_a, vel_a, circle_a) in query.iter_unsafe() {
-            let vel_a_sqr = vel_a.0.length_squared();
-            for (entity_b, pos_b, vel_b, circle_b) in query.iter_unsafe() {
+        for (entity_a, aabb_a) in query.iter_unsafe() {
+            for (entity_b, aabb_b) in query.iter_unsafe() {
                 // Ensure safety
                 if entity_a <= entity_b {
                     continue;
                 }
-
-                let ab = pos_b.0 - pos_a.0;
-                let vel_b_sqr = vel_b.0.length_squared();
-                let safety_margin_sqr = safety_margin_factor_sqr * (vel_a_sqr + vel_b_sqr);
-
-                let combined_radius = circle_a.radius + circle_b.radius + safety_margin_sqr.sqrt();
-
-                let ab_sqr_len = ab.length_squared();
-                if ab_sqr_len < combined_radius * combined_radius {
+                if aabb_a.intersects(aabb_b) {
                     collision_pairs.0.push((entity_a, entity_b));
                 }
             }
@@ -146,32 +149,52 @@ fn integrate(
     }
 }
 
+fn constrain_body_positions(
+    pos_a: &mut Pos,
+    pos_b: &mut Pos,
+    mass_a: &Mass,
+    mass_b: &Mass,
+    normal: Vec2,
+    penetration_depth: f32,
+) {
+    let w_a = 1.0 / mass_a.0;
+    let w_b = 1.0 / mass_b.0;
+    let w_sum = w_a + w_b;
+    let pos_impulse = normal * (-penetration_depth / w_sum);
+    pos_a.0 += pos_impulse * w_a;
+    pos_b.0 -= pos_impulse * w_b;
+}
+
+fn constrain_body_position(pos: &mut Pos, normal: Vec2, penetration_depth: f32) {
+    pos.0 -= normal * penetration_depth;
+}
+
 fn solve_pos(
     query: Query<(&mut Pos, &CircleCollider, &Mass)>,
+    //mut contacts: ResMut<Contacts>,
     collision_pairs: Res<CollisionPairs>,
 ) {
-    for (entity_a, entity_b) in collision_pairs.0.iter() {
-        let ((mut pos_a, circle_a, mass_a), (mut pos_b, circle_b, mass_b)) = unsafe {
-            assert!(entity_a != entity_b); // Ensure we do not violate memory constraints
-            (
-                query.get_unchecked(*entity_a).unwrap(),
-                query.get_unchecked(*entity_b).unwrap(),
-            )
-        };
-        let ab = pos_b.0 - pos_a.0;
-        let combined_radius = circle_a.radius + circle_b.radius;
-        let ab_sqr_len = ab.length_squared();
-        if ab_sqr_len < combined_radius * combined_radius {
-            let ab_length = ab_sqr_len.sqrt();
-            let penetration_depth = combined_radius - ab_length;
-            let normal = ab / ab_length;
-
-            let w_a = 1. / mass_a.0;
-            let w_b = 1. / mass_b.0;
-            let w_sum = w_a + w_b;
-
-            pos_a.0 -= normal * penetration_depth * w_a / w_sum;
-            pos_b.0 += normal * penetration_depth * w_b / w_sum;
+    debug!("  solve_pos");
+    for (entity_a, entity_b) in collision_pairs.0.iter().cloned() {
+        if let (Ok((mut pos_a, circle_a, mass_a)), Ok((mut pos_b, circle_b, mass_b))) = unsafe {
+            assert!(entity_a != entity_b); // Ensure we don't violate memory constraints
+            (query.get_unchecked(entity_a), query.get_unchecked(entity_b))
+        } {
+            if let Some(Contact {
+                normal,
+                penetration,
+            }) = contact::ball_ball(pos_a.0, circle_a.radius, pos_b.0, circle_b.radius)
+            {
+                constrain_body_positions(
+                    &mut pos_a,
+                    &mut pos_b,
+                    mass_a,
+                    mass_b,
+                    normal,
+                    penetration,
+                );
+                // contacts.0.push((entity_a, entity_b, normal));
+            }
         }
     }
 }
@@ -183,15 +206,12 @@ fn solve_pos_statics(
 ) {
     for (entity_a, mut pos_a, circle_a) in dynamics.iter_mut() {
         for (entity_b, pos_b, circle_b) in statics.iter() {
-            let ab = pos_b.0 - pos_a.0;
-            let combined_radius = circle_a.radius + circle_b.radius;
-            let ab_sqr_len = ab.length_squared();
-            if ab_sqr_len < combined_radius * combined_radius {
-                let ab_length = ab_sqr_len.sqrt();
-                let penetration_depth = combined_radius - ab_length;
-                let normal = ab / ab_length;
-
-                pos_a.0 -= normal * penetration_depth;
+            if let Some(Contact {
+                normal,
+                penetration,
+            }) = contact::ball_ball(pos_a.0, circle_a.radius, pos_b.0, circle_b.radius)
+            {
+                constrain_body_position(&mut pos_a, normal, penetration);
                 contacts.0.push((entity_a, entity_b, normal));
             }
         }
@@ -205,38 +225,81 @@ fn solve_pos_static_boxes(
 ) {
     for (entity_a, mut pos_a, circle_a) in dynamics.iter_mut() {
         for (entity_b, pos_b, box_b) in statics.iter() {
-            let box_to_circle = pos_a.0 - pos_b.0;
-            let box_to_circle_abs = box_to_circle.abs();
-            let half_extents = box_b.size / 2.;
-            let corner_to_centre = box_to_circle_abs - half_extents;
-            let r = circle_a.radius;
-            if corner_to_centre.x > r || corner_to_centre.y > r {
-                continue;
-            }
-
-            let s = box_to_circle.signum();
-
-            let (normal, penetration_depth) = if corner_to_centre.x > 0. && corner_to_centre.y > 0.
+            if let Some(Contact {
+                normal,
+                penetration,
+            }) = contact::ball_box(pos_a.0, circle_a.radius, pos_b.0, box_b.size)
             {
-                // corner case
-                let corner_to_centre_sqr = corner_to_centre.length_squared();
-                if corner_to_centre_sqr > r * r {
-                    continue;
-                }
-                let corner_dist = corner_to_centre_sqr.sqrt();
-                let penetration_depth = r - corner_dist;
-                let normal = corner_to_centre / corner_dist * -s;
-                (normal, penetration_depth)
-            } else if corner_to_centre.x > corner_to_centre.y {
-                // closer to vertical edge
-                (Vec2::X * -s.x, -corner_to_centre.x + r)
-            } else {
-                (Vec2::Y * -s.y, -corner_to_centre.y + r)
-            };
-
-            pos_a.0 -= normal * penetration_depth;
-            contacts.0.push((entity_a, entity_b, normal));
+                constrain_body_position(&mut pos_a, normal, penetration);
+                contacts.0.push((entity_a, entity_b, normal));
+            }
         }
+    }
+}
+
+fn solve_pos_box_box(
+    query: Query<(&mut Pos, &BoxCollider, &Mass)>,
+    mut contacts: ResMut<Contacts>,
+    collision_pairs: Res<CollisionPairs>,
+) {
+    for (entity_a, entity_b) in collision_pairs.0.iter().cloned() {
+        if let (Ok((mut pos_a, box_a, mass_a)), Ok((mut pos_b, box_b, mass_b))) = unsafe {
+            assert!(entity_a != entity_b); // Ensure we don't violate memory constraints
+            (query.get_unchecked(entity_a), query.get_unchecked(entity_b))
+        } {
+            if let Some(Contact {
+                normal,
+                penetration,
+            }) = contact::box_box(pos_a.0, box_a.size, pos_b.0, box_b.size)
+            {
+                constrain_body_positions(
+                    &mut pos_a,
+                    &mut pos_b,
+                    mass_a,
+                    mass_b,
+                    normal,
+                    penetration,
+                );
+                contacts.0.push((entity_a, entity_b, normal));
+            }
+        }
+    }
+}
+
+fn solve_pos_static_box_box(
+    mut dynamics: Query<(Entity, &mut Pos, &BoxCollider), With<Mass>>,
+    statics: Query<(Entity, &Pos, &BoxCollider), Without<Mass>>,
+    mut contacts: ResMut<StaticContacts>,
+) {
+    for (entity_a, mut pos_a, box_a) in dynamics.iter_mut() {
+        for (entity_b, pos_b, box_b) in statics.iter() {
+            if let Some(Contact {
+                normal,
+                penetration,
+            }) = contact::box_box(pos_a.0, box_a.size, pos_b.0, box_b.size)
+            {
+                constrain_body_position(&mut pos_a, normal, penetration);
+                contacts.0.push((entity_a, entity_b, normal));
+            }
+        }
+    }
+}
+
+fn update_aabb_circle(mut query: Query<(&mut Aabb, &Pos, &Vel, &CircleCollider)>) {
+    for (mut aabb, pos, vel, circle) in query.iter_mut() {
+        let margin = COLLISION_PAIR_VEL_MARGIN_FACTOR * vel.0.length();
+        let half_extents = Vec2::splat(circle.radius + margin);
+        aabb.min = pos.0 - half_extents;
+        aabb.max = pos.0 + half_extents;
+    }
+}
+
+fn update_aabb_box(mut query: Query<(&mut Aabb, &Pos, &Vel, &BoxCollider)>) {
+    for (mut aabb, pos, vel, r#box) in query.iter_mut() {
+        let margin = COLLISION_PAIR_VEL_MARGIN_FACTOR * vel.0.length();
+        let half_extents = r#box.size / 2.0 + Vec2::splat(margin);
+        aabb.min = pos.0 - half_extents;
+        aabb.max = pos.0 + half_extents;
     }
 }
 

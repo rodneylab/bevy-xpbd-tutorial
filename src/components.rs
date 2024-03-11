@@ -1,5 +1,21 @@
 use bevy::{ecs::component::Component, math::Vec2};
 
+/// Component for Axis-aligned bounding boxes
+#[derive(Component, Debug, Default)]
+pub struct Aabb {
+    pub(crate) min: Vec2,
+    pub(crate) max: Vec2,
+}
+
+impl Aabb {
+    pub fn intersects(&self, other: &Self) -> bool {
+        self.max.x >= other.min.x
+            && self.max.y >= other.min.y
+            && self.min.x <= other.max.x
+            && self.min.y <= other.max.x
+    }
+}
+
 #[derive(Component, Debug)]
 pub struct BoxCollider {
     pub size: Vec2,
@@ -58,7 +74,7 @@ mod tests {
     use float_cmp::approx_eq;
 
     #[test]
-    fn circle_collide_sets_expected_defaults() {
+    fn circle_collider_sets_expected_defaults() {
         // arrange
         // act
         let collider = CircleCollider::default();
