@@ -14,7 +14,7 @@ description = "Video game physics engine using Bevy by following Johan Helsing t
 # debug = true
 
 [dependencies]
-bevy = "0.13"
+bevy = "0.14"
 rand = "0.8"
 
 [dev-dependencies]
